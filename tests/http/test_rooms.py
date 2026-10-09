@@ -593,6 +593,34 @@ def test_rooms_whole_store_capacity_counts_unlisted_without_naming_them(
     }
 
 
+def test_rooms_text_separates_category_stats_from_whole_store_capacity(
+    client, tmp_path, monkeypatch
+):
+    import app as app_module
+    import store
+
+    monkeypatch.setattr(store, "MAX_ROOMS", 12)
+    assert client.get("/r/discussion/say/bot/hello").status_code == 200
+    store._write_record(tmp_path, "mb-public", "bot", "hello")
+    for i in range(8):
+        store._write_record(tmp_path, f"p-hidden-{i}", "bot", "hidden")
+    store._reap_pass(tmp_path, store.time.time())
+    app_module._rooms_walk.cache_clear()
+
+    views = {
+        kind: client.get(f"/rooms?kind={kind}").text for kind in ("discussion", "mailbox", "all")
+    }
+    assert views["discussion"].splitlines()[0].startswith("# 2 of 2 rooms (kind=discussion;")
+    assert views["mailbox"].splitlines()[0].startswith("# 1 of 1 rooms (kind=mailbox;")
+    assert views["all"].splitlines()[0].startswith("# 3 of 3 rooms (kind=all;")
+    assert client.get("/rooms").text == views["all"]
+    for body in views.values():
+        assert "# whole store 11 of 12 rooms" in body
+        assert "room bytes at last reap" in body
+        assert "private/unlisted names not listed" in body
+        assert "p-hidden" not in body
+
+
 def test_rooms_labels_stale_whole_store_bytes_after_an_existing_room_grows(
     client, tmp_path, monkeypatch
 ):

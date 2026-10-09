@@ -25,15 +25,16 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-10-09, 160 checks, all passing — expected shape:
+ * Checked 2026-10-09, 165 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
  *   category        removes stale room targets while the next category request is pending,
  *                   rejects pre-ABA responses, and lets one slow same-kind poll finish
  *                   before starting another; network, JSON, and timeout failures recover
- *   capacity        category counts stay scoped; count warnings do not change views, and
- *                   last-reap bytes are labelled as a snapshot rather than live headroom
+ *   capacity        category counts stay scoped; count warnings do not change views,
+ *                   last-reap bytes are labelled as a snapshot rather than live headroom,
+ *                   and an old edge payload without whole_store still renders and recovers
  *   open a room     scrolls the Room heading into view
  *   Enter in filter opens the top match
  *   mobile 390px    4 columns (byte column dropped), no horizontal scroll at 320-1280px
@@ -474,6 +475,46 @@ const browser = await chromium.launch({
   check("a stale byte snapshot does not drive a real-time capacity warning",
         (await staleBytesPage.locator("#stats .badge.err").count()) === 0);
   await staleBytesPage.close();
+
+  console.log("legacy /rooms cache compatibility");
+  const legacyPage = await context.newPage();
+  await legacyPage.clock.install();
+  legacyPage.setDefaultTimeout(5000);
+  const legacyErrors = [];
+  legacyPage.on("pageerror", (e) => legacyErrors.push(e.message));
+  let allCalls = 0;
+  let markLegacyReturned;
+  const legacyReturned = new Promise((resolve) => { markLegacyReturned = resolve; });
+  await legacyPage.route("**/rooms?*", async (route) => {
+    const kind = new URL(route.request().url()).searchParams.get("kind");
+    let payload;
+    if (kind === "all" && ++allCalls === 1) {
+      payload = view("legacy-cached-room");
+      delete payload.whole_store;
+    } else {
+      payload = view(kind === "all" ? "modern-room" : "initial-discussion");
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
+    if (kind === "all" && allCalls === 1) markLegacyReturned();
+  });
+  await legacyPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await legacyPage.locator(".btn-ghost", { hasText: "initial-discussion" }).waitFor();
+  await legacyPage.selectOption("#kind", "all");
+  await legacyReturned;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  check("an old cached payload does not throw", legacyErrors.length === 0, legacyErrors.join("; "));
+  check("an old cached payload still renders its room list",
+        (await legacyPage.locator(".btn-ghost", { hasText: "legacy-cached-room" }).count()) === 1);
+  check("missing global capacity is reported without substituting category totals",
+        (await legacyPage.locator("#stats").innerText()).includes("global capacity unavailable"));
+  await legacyPage.clock.fastForward(5000);
+  await legacyPage.locator(".btn-ghost", { hasText: "modern-room" }).waitFor();
+  check("a modern response restores global capacity after the cached payload",
+        allCalls === 2
+        && (await legacyPage.locator("#stats").innerText()).includes("1 of 5120 global room cap"));
+  check("the legacy-to-modern transition has no page errors", legacyErrors.length === 0,
+        legacyErrors.join("; "));
+  await legacyPage.close();
   await context.close();
 }
 

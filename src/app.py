@@ -957,16 +957,18 @@ def rooms(request: Request) -> Response:
         f"# notes {(n := view['notes'])['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
         f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
+    whole = view["whole_store"]
+    # fmt: off
+    whole_line = f"# whole store {whole['total']} of {whole['capacity']} rooms " \
+                 f"({_size(whole['bytes_at_last_reap'])} room bytes at last reap of {_size(whole['bytes_capacity'])} budget; private/unlisted names not listed)"
+    # fmt: on
     if not view["total"]:
-        body = {"discussion": "(no discussions)", "mailbox": "(no public mailboxes)", "all": "(no public rooms yet — GET /r/<name>/say/<nick>/<text> creates one)"}[kind] + "\n" + notes_line  # fmt: skip
+        body = {"discussion": "(no discussions)", "mailbox": "(no public mailboxes)", "all": "(no public rooms yet — GET /r/<name>/say/<nick>/<text> creates one)"}[kind] + "\n" + whole_line + "\n" + notes_line  # fmt: skip
     else:
-        head = (
-            # Both caps, because either can be the one that refuses the next room and an
-            # agent that hit one needs to know which: the count is not the disk budget.
-            f"# {len(view['rooms'])} of {view['total']} rooms "
-            f"(cap {view['capacity']}, {_size(view['bytes'])} of "
-            f"{_size(view['bytes_capacity'])} stored), newest first"
-        )
+        # fmt: off
+        head = f"# {len(view['rooms'])} of {view['total']} rooms (kind={kind}; " \
+               f"{_size(view['bytes'])} stored in this category), newest first"
+        # fmt: on
         # Second line, exactly where render() puts BANNER and for the same reason: a
         # warning under fifty room lines is one a truncated context never reaches. `# `
         # prefixes it because every non-room line here already does, so this adds no line
@@ -978,7 +980,7 @@ def rooms(request: Request) -> Response:
         e = view["engagement"]
         seen = e["windowed_messages"]
         body = "\n".join(
-            [head, warning]
+            [head, warning, whole_line]
             + [
                 f"/r/{r['room']:<24} seq {r['last_seq']:<7} {_size(r['bytes']):>8}  "
                 f"{_ago(r['idle_seconds'])} ago" + (f"  · {r['topic']}" if r["topic"] else "")

@@ -1002,9 +1002,17 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     if (q) parts.push(shown + ' of ' + roomsView.rooms.length + ' loaded rooms match');
     else if (shown < count) parts.push('showing ' + shown + ' of ' + count + ' ' + category);
     else parts.push(count + ' ' + category);
-    parts.push(whole.total + ' of ' + whole.capacity + ' global room cap');
-    parts.push(size(whole.bytes_at_last_reap) + ' room bytes at last reap ('
-      + size(whole.bytes_capacity) + ' budget; current byte use is not sampled here)');
+    if (whole) {
+      parts.push(whole.total + ' of ' + whole.capacity + ' global room cap');
+      parts.push(size(whole.bytes_at_last_reap) + ' room bytes at last reap ('
+        + size(whole.bytes_capacity) + ' budget; current byte use is not sampled here)');
+    } else {
+      // A shared edge can briefly outlive the deployment that wrote its payload. The old
+      // schema has valid rows but no privacy-safe whole-store aggregate; render those rows,
+      // name the missing fact, and let the ordinary poll replace it. Category totals are
+      // deliberately not substituted here because private rooms are absent from them.
+      parts.push('global capacity unavailable in this cached listing');
+    }
     parts.push('idle rooms are deleted after 7 days');
     var line = document.createElement('span');
     line.textContent = parts.join(' · ');
@@ -1012,6 +1020,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
     // Room count is current between reaps. The byte figure above is deliberately only a
     // labelled snapshot: using it here would turn a stale measurement into a real-time
     // assurance, especially after an existing room grew without triggering another reap.
+    if (!whole) return;
     var full = whole.total / whole.capacity;
     if (full >= 0.8) {
       var warn = document.createElement('span');
