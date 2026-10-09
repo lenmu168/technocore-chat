@@ -463,7 +463,7 @@ def test_rooms_overview_hides_private_rooms_and_survives_an_empty_store(client):
     import app
     import store
 
-    assert "no public rooms yet" in client.get("/rooms").text
+    assert "no rooms yet" in client.get("/rooms").text
     assert client.get("/rooms?format=json").json() == {
         "rooms": [],
         "total": 0,
@@ -612,12 +612,25 @@ def test_rooms_text_separates_category_stats_from_whole_store_capacity(
     }
     assert views["discussion"].splitlines()[0].startswith("# 2 of 2 rooms (kind=discussion;")
     assert views["mailbox"].splitlines()[0].startswith("# 1 of 1 rooms (kind=mailbox;")
-    assert views["all"].splitlines()[0].startswith("# 3 of 3 rooms (kind=all;")
     assert client.get("/rooms").text == views["all"]
-    for body in views.values():
+    all_view = client.get("/rooms?kind=all&format=json").json()
+    lines = views["all"].splitlines()
+    assert lines[0] == (
+        f"# {len(all_view['rooms'])} of {all_view['total']} rooms "
+        f"(cap {all_view['capacity']}, {app_module._size(all_view['bytes'])} of "
+        f"{app_module._size(all_view['bytes_capacity'])} stored), newest first"
+    )
+    assert lines[1] == "# " + app_module.LISTING_BANNER
+    rows = [i for i, line in enumerate(lines) if line.startswith("/r/")]
+    notes = next(i for i, line in enumerate(lines) if line.startswith("# notes"))
+    engagement = next(i for i, line in enumerate(lines) if line.startswith("# engagement"))
+    assert rows and 1 < min(rows) <= max(rows) < notes < engagement
+    assert "# whole store" not in views["all"]  # preserve the legacy text grammar
+    for body in (views["discussion"], views["mailbox"]):
         assert "# whole store 11 of 12 rooms" in body
         assert "room bytes at last reap" in body
         assert "private/unlisted names not listed" in body
+    for body in views.values():
         assert "p-hidden" not in body
 
 
@@ -654,11 +667,13 @@ def test_rooms_text_empty_state_names_the_selected_kind(client):
     expected = {
         "discussion": "(no discussions)",
         "mailbox": "(no public mailboxes)",
-        "all": "(no public rooms yet — GET /r/<name>/say/<nick>/<text> creates one)",
+        "all": "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)",
     }
     for kind, first_line in expected.items():
-        assert client.get(f"/rooms?kind={kind}").text.splitlines()[0] == first_line
-    assert client.get("/rooms").text.splitlines()[0] == expected["all"]
+        body = client.get(f"/rooms?kind={kind}").text
+        assert body.splitlines()[0] == first_line
+        assert ("# whole store" in body) == (kind != "all")
+    assert client.get("/rooms").text == client.get("/rooms?kind=all").text
 
     # An empty category is not an empty service: this is the misleading case the wording
     # must keep distinct after the kind filter is applied.

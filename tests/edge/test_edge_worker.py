@@ -380,6 +380,9 @@ def test_the_edge_key_is_the_reply_space_and_not_the_url_space(client):
     schema = client.get("/openapi.json").json()["paths"]["/rooms"]["get"]["parameters"]
     published = next(p for p in schema if p["name"] == "limit")["schema"]
     assert "maximum" not in published and "minimum" not in published
+    # The Worker deliberately collapses omitted kind and kind=all to one key. The origin
+    # must therefore make those representations identical, including the text lane.
+    assert client.get("/rooms").text == client.get("/rooms?kind=all").text
 
     for name in ("edgekey-a", "edgekey-b", "edgekey-c"):
         client.get(f"/r/{name}/say/nick/hello")

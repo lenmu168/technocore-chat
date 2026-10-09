@@ -963,43 +963,43 @@ def rooms(request: Request) -> Response:
                  f"({_size(whole['bytes_at_last_reap'])} room bytes at last reap of {_size(whole['bytes_capacity'])} budget; private/unlisted names not listed)"
     # fmt: on
     if not view["total"]:
-        body = {"discussion": "(no discussions)", "mailbox": "(no public mailboxes)", "all": "(no public rooms yet — GET /r/<name>/say/<nick>/<text> creates one)"}[kind] + "\n" + whole_line + "\n" + notes_line  # fmt: skip
+        empty = {
+            "discussion": "(no discussions)",
+            "mailbox": "(no public mailboxes)",
+        }.get(kind, "(no rooms yet — GET /r/<name>/say/<nick>/<text> creates one)")
+        body = "\n".join([empty] + ([] if kind == "all" else [whole_line]) + [notes_line])
     else:
-        # fmt: off
-        head = f"# {len(view['rooms'])} of {view['total']} rooms (kind={kind}; " \
-               f"{_size(view['bytes'])} stored in this category), newest first"
-        # fmt: on
+        stored = _size(view["bytes"])
+        detail = f"kind={kind}; {stored} stored in this category"
+        if kind == "all":
+            # This legacy head mixes listed bytes with service caps. JSON whole_store is the
+            # authoritative global gauge; changing the public text grammar would break clients.
+            detail = f"cap {view['capacity']}, {stored} of {_size(view['bytes_capacity'])} stored"
+        head = f"# {len(view['rooms'])} of {view['total']} rooms ({detail}), newest first"
         # Second line, exactly where render() puts BANNER and for the same reason: a
         # warning under fifty room lines is one a truncated context never reaches. `# `
         # prefixes it because every non-room line here already does, so this adds no line
         # shape and a client that skips comments or matches /r/ is unaffected. The empty
         # listing above prints no caller bytes, so it says nothing about them.
-        warning = "# " + LISTING_BANNER
         # One line, not a column: the per-room numbers are on ?format=json, because the text
         # view is what lands in an agent's context and that budget is the scarce one.
+        lines = [head, "# " + LISTING_BANNER] + ([] if kind == "all" else [whole_line])
+        lines += [
+            f"/r/{r['room']:<24} seq {r['last_seq']:<7} {_size(r['bytes']):>8}  "
+            f"{_ago(r['idle_seconds'])} ago" + (f"  · {r['topic']}" if r["topic"] else "")
+            # A room that says what it is for is a room an agent can skip without
+            # reading it — cheaper than the tail fetch the name alone would cost.
+            for r in view["rooms"]
+        ] + [notes_line]
         e = view["engagement"]
-        seen = e["windowed_messages"]
-        body = "\n".join(
-            [head, warning, whole_line]
-            + [
-                f"/r/{r['room']:<24} seq {r['last_seq']:<7} {_size(r['bytes']):>8}  "
-                f"{_ago(r['idle_seconds'])} ago" + (f"  · {r['topic']}" if r["topic"] else "")
-                # A room that says what it is for is a room an agent can skip without
-                # reading it — cheaper than the tail fetch the name alone would cost.
-                for r in view["rooms"]
-            ]
-            + [notes_line]
-            + (
-                [
-                    f"# engagement over {seen} msgs scanned: zero-response "
-                    f"{e['zero_response_share']:.0%}, nick diversity "
-                    f"{e['nick_diversity']:.2f}, notes/msg "
-                    f"{e['windowed_note_to_message_ratio']:.2f}"
-                ]
-                if seen
-                else []
+        if seen := e["windowed_messages"]:
+            lines.append(
+                f"# engagement over {seen} msgs scanned: zero-response "
+                f"{e['zero_response_share']:.0%}, nick diversity "
+                f"{e['nick_diversity']:.2f}, notes/msg "
+                f"{e['windowed_note_to_message_ratio']:.2f}"
             )
-        )
+        body = "\n".join(lines)
     note = budget_note("read", left, RATE_READ)
     # A budget footer is one caller's pacing — a reply carrying one stays no-store.
     return _shareable(respond(request, view, body, note), note)
