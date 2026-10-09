@@ -25,12 +25,13 @@
  * Exits non-zero on the first failed check, so it is usable by hand before pushing as well
  * as by the workflow.
  *
- * Checked 2026-09-10, 156 checks, all passing — expected shape:
+ * Checked 2026-10-09, 160 checks, all passing — expected shape:
  *   desktop 900px   5 columns, copy icon is an <svg> with an accessible name
  *   copy            writes the #r/<room> permalink, swaps glyph + label, restores after 1.2s
  *   filter          narrows rows, counts against LOADED rooms, survives the 5s refresh
- *   category        removes stale room targets while the next category request is pending
- *                   and rejects older same-kind responses after category ABA or overlapping polls
+ *   category        removes stale room targets while the next category request is pending,
+ *                   rejects pre-ABA responses, and lets one slow same-kind poll finish
+ *                   before starting another; network, JSON, and timeout failures recover
  *   capacity        category counts stay scoped; count warnings do not change views, and
  *                   last-reap bytes are labelled as a snapshot rather than live headroom
  *   open a room     scrolls the Room heading into view
@@ -269,7 +270,7 @@ const browser = await chromium.launch({
   check("the new category's row remains clickable", (await page.inputValue("#room")) === "mb-new-room");
   await page.close();
 
-  async function staleRace(categoryABA) {
+  async function categoryABARace() {
     const racePage = await context.newPage();
     racePage.setDefaultTimeout(5000);
     let releaseOld;
@@ -294,13 +295,9 @@ const browser = await chromium.launch({
     });
     await racePage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
     await oldStarted;
-    if (categoryABA) {
-      await racePage.selectOption("#kind", "mailbox");
-      await racePage.locator(".btn-ghost", { hasText: "mb-current" }).waitFor();
-      await racePage.selectOption("#kind", "discussion");
-    } else {
-      await racePage.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-    }
+    await racePage.selectOption("#kind", "mailbox");
+    await racePage.locator(".btn-ghost", { hasText: "mb-current" }).waitFor();
+    await racePage.selectOption("#kind", "discussion");
     await racePage.locator(".btn-ghost", { hasText: "fresh-discussion" }).waitFor();
     const before = await racePage.locator("#rooms tbody .btn-ghost").first().innerText();
     releaseOld();
@@ -317,14 +314,112 @@ const browser = await chromium.launch({
   }
 
   console.log("room response generations");
-  const categoryABA = await staleRace(true);
+  const categoryABA = await categoryABARace();
   check("a newer discussion response renders after category ABA",
         categoryABA.before === "fresh-discussion" && categoryABA.discussionCalls === 2);
   check("the old pre-ABA response cannot replace it", categoryABA.fresh === 1 && categoryABA.stale === 0);
-  const sameKind = await staleRace(false);
-  check("a newer overlapping same-kind response renders",
-        sameKind.before === "fresh-discussion" && sameKind.discussionCalls === 2);
-  check("the older same-kind response cannot replace it", sameKind.fresh === 1 && sameKind.stale === 0);
+
+  const slowPage = await context.newPage();
+  await slowPage.clock.install();
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  let markSlowStarted;
+  const slowStarted = new Promise((resolve) => { markSlowStarted = resolve; });
+  let slowCalls = 0;
+  await slowPage.route("**/rooms?*", async (route) => {
+    slowCalls++;
+    if (slowCalls === 1) {
+      markSlowStarted();
+      await slowGate;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(view(slowCalls === 1 ? "slow-discussion" : "later-discussion")),
+    });
+  });
+  await slowPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await slowStarted;
+  await slowPage.clock.fastForward(6000);
+  check("a same-kind poll stays single-flight past the five-second refresh", slowCalls === 1,
+        `${slowCalls} requests`);
+  releaseSlow();
+  await slowPage.locator(".btn-ghost", { hasText: "slow-discussion" }).waitFor();
+  check("a response slower than the refresh interval still renders",
+        (await slowPage.locator(".btn-ghost", { hasText: "slow-discussion" }).count()) === 1);
+  await slowPage.close();
+
+  async function failedFlightRecovers(mode) {
+    const recoveryPage = await context.newPage();
+    await recoveryPage.clock.install();
+    let calls = 0;
+    await recoveryPage.route("**/rooms?*", async (route) => {
+      calls++;
+      if (calls === 1 && mode === "network") {
+        await route.abort("failed");
+      } else if (calls === 1) {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "not json" });
+      } else {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(view(`${mode}-recovered`)),
+        });
+      }
+    });
+    await recoveryPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+    await recoveryPage.locator("#stats", { hasText: "Could not load" }).waitFor();
+    await recoveryPage.clock.fastForward(5000);
+    await recoveryPage.locator(".btn-ghost", { hasText: `${mode}-recovered` }).waitFor();
+    const result = calls;
+    await recoveryPage.close();
+    return result;
+  }
+
+  check("a network failure releases the single-flight request",
+        (await failedFlightRecovers("network")) === 2);
+  check("a JSON parse failure releases the single-flight request",
+        (await failedFlightRecovers("json")) === 2);
+
+  const timeoutPage = await context.newPage();
+  await timeoutPage.clock.install();
+  let releaseTimedOut;
+  const timedOutGate = new Promise((resolve) => { releaseTimedOut = resolve; });
+  let releaseTimeoutRecovery;
+  const timeoutRecoveryGate = new Promise((resolve) => { releaseTimeoutRecovery = resolve; });
+  let markTimeoutStarted;
+  const timeoutStarted = new Promise((resolve) => { markTimeoutStarted = resolve; });
+  let markTimeoutRecoveryStarted;
+  const timeoutRecoveryStarted = new Promise((resolve) => { markTimeoutRecoveryStarted = resolve; });
+  let timeoutCalls = 0;
+  await timeoutPage.route("**/rooms?*", async (route) => {
+    timeoutCalls++;
+    if (timeoutCalls === 1) {
+      markTimeoutStarted();
+      await timedOutGate;
+    } else {
+      markTimeoutRecoveryStarted();
+      await timeoutRecoveryGate;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(view(timeoutCalls === 1 ? "timed-out" : "timeout-recovered")),
+    }).catch(() => {});
+  });
+  await timeoutPage.goto(`${BASE}/humans`, { waitUntil: "domcontentloaded" });
+  await timeoutStarted;
+  await timeoutPage.clock.fastForward(15001);
+  await timeoutPage.locator("#stats", { hasText: "Could not load" }).waitFor();
+  check("the 15-second deadline still reports an error",
+        (await timeoutPage.locator("#stats").innerText()).includes("Could not load"));
+  if (timeoutCalls === 1) await timeoutPage.clock.fastForward(5000);
+  await timeoutRecoveryStarted;
+  releaseTimeoutRecovery();
+  await timeoutPage.locator(".btn-ghost", { hasText: "timeout-recovered" }).waitFor();
+  check("a timed-out request releases the next poll", timeoutCalls === 2);
+  releaseTimedOut();
+  await timeoutPage.close();
 
   console.log("global capacity across category views");
   const capacityPage = await context.newPage();

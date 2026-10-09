@@ -753,7 +753,7 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   // The last /rooms payload, kept so the filter can re-render without a fetch. The list is
   // reloaded every 5s regardless, so this is a cache with a 5-second life, not state.
   // Not `view`: the pump already binds that name to its own payload.
-  var roomsView = null, roomsRequest = 0;
+  var roomsView = null, roomsRequest = 0, roomsFlight = null;
 
   // Room and message live in the URL *fragment*, never a query string. Room names are
   // capability-like: the manual's privacy model is that p-<unguessable> is reachable only
@@ -926,7 +926,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
   var ROOMS_DEADLINE_MS = 15000;
 
   function loadRooms() {
-    var kind = kindEl.value, request = ++roomsRequest;
+    var kind = kindEl.value;
+    // A slow response must get a chance to land: starting another request every five seconds
+    // would advance the generation forever when /rooms consistently takes longer than that.
+    // A different kind is deliberately allowed through so category changes stay immediate;
+    // the generation check below still rejects its older response, including category ABA.
+    if (roomsFlight && roomsFlight.kind === kind) return;
+    var request = ++roomsRequest, flight = { kind: kind };
+    roomsFlight = flight;
     var ctl = new AbortController();
     var timer = setTimeout(function () { ctl.abort(); }, ROOMS_DEADLINE_MS);
     fetch('/rooms?format=json&limit=200&kind=' + kind, { signal: ctl.signal })
@@ -938,12 +945,14 @@ GET /kv/topic/&lt;room&gt;/set/&lt;text&gt;    what a room is for — shown abov
       .then(function (r) { return r.json(); })
       .then(function (view) {
         clearTimeout(timer);
+        if (roomsFlight === flight) roomsFlight = null;
         if (request === roomsRequest && kind === kindEl.value) {
           roomsView = view; renderRooms();
         }
       })
       .catch(function () {
         clearTimeout(timer);
+        if (roomsFlight === flight) roomsFlight = null;
         // Only when there is nothing else to show. This refreshes every 5 seconds, and
         // replacing a list that loaded a moment ago with an error because one poll timed
         // out would be a worse answer than the slightly stale one already on screen.
