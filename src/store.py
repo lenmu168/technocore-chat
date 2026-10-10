@@ -1427,7 +1427,7 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
                 **_engagement(nicks),
             }
         )
-    # fmt: off
+    whole_total, whole_bytes_at_last_reap = _note_totals(root, _count_rooms, name=USAGE_FILE)
     return {
         "rooms": shown,
         "total": len(entries),
@@ -1439,10 +1439,14 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
         "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
         # The room count is current between reaps; bytes are the explicitly named cached
         # measurement used by the create/compaction gates. Names deliberately stay absent.
-        "whole_store": {"total": (whole_usage := _note_totals(root, _count_rooms, name=USAGE_FILE))[0], "capacity": MAX_ROOMS, "bytes_at_last_reap": whole_usage[1], "bytes_capacity": MAX_TOTAL_ROOM_BYTES},
+        "whole_store": {
+            "total": whole_total,
+            "capacity": MAX_ROOMS,
+            "bytes_at_last_reap": whole_bytes_at_last_reap,
+            "bytes_capacity": MAX_TOTAL_ROOM_BYTES,
+        },
         "engagement": _rollup(windows),
     }
-    # fmt: on
 
 
 def service_stats(root: Path, engagement_rooms: int = 50) -> dict:
@@ -2187,15 +2191,12 @@ def _count_notes(root: Path) -> tuple[int, int]:
     """
     total = 0
     size = 0
-    try:
-        with os.scandir(root / "notes") as namespaces:
-            for ns in namespaces:
-                if ns.is_dir():
-                    count, ns_bytes = _scan(ns.path, ".txt", sized=True)
-                    total += count
-                    size += ns_bytes
-    except FileNotFoundError:
-        pass
+    with suppress(FileNotFoundError), os.scandir(root / "notes") as namespaces:
+        for ns in namespaces:
+            if ns.is_dir():
+                count, ns_bytes = _scan(ns.path, ".txt", sized=True)
+                total += count
+                size += ns_bytes
     return total, size
 
 
@@ -2230,12 +2231,10 @@ def _read_counts(d: Path, name: str = NOTES_FILE) -> tuple[int, int] | None:
     answer to that — `_note_totals` walks, `room_bytes_used` reads it as no pressure, and the
     reaper writes what its own walk saw — and each one says why.
     """
-    try:
+    with suppress(OSError, ValueError):
         count, size = (d / name).read_text(encoding="utf-8").split()
         if int(count) >= 0 and int(size) >= 0:
             return int(count), int(size)
-    except (OSError, ValueError):
-        pass
     return None
 
 
@@ -2269,10 +2268,8 @@ def _note_totals(d: Path, rebuild=_count_notes, persist=False, name=NOTES_FILE) 
         return cached
     totals = rebuild(d)
     if persist and totals[0]:
-        try:
+        with suppress(OSError):
             _write_note_count(d, *totals, name=name)
-        except OSError:
-            pass
     return totals
 
 
