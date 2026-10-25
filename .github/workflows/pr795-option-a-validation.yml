@@ -1,0 +1,220 @@
+name: PR 795 Option A Linux validation
+
+on:
+  push:
+    branches: [codex/pr795-option-a-linux-ci-20261025]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr795-option-a-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: "policy gates (expected size failure)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Run official check recipe
+        id: just_check
+        continue-on-error: true
+        run: uv run just check
+      - name: Measure caps and baseline without hiding either verdict
+        id: size
+        continue-on-error: true
+        run: |
+          cap_status=0
+          baseline_status=0
+          uv run sz.py --caps || cap_status=$?
+          uv run sz.py --check || baseline_status=$?
+          if [[ $cap_status -ne 0 || $baseline_status -ne 0 ]]; then
+            exit 1
+          fi
+      - name: Protected-file and secret checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          changed="$(git diff --name-only 6959be8c6e3bb4ad34191d67bee63b98e76ab55a...HEAD)"
+          printf '%s\n' "$changed"
+          if grep -Eq '^(CHANGELOG\.md|sz-baseline\.json)$' <<<"$changed"; then
+            echo "protected file changed" >&2
+            exit 1
+          fi
+          if git diff 6959be8c6e3bb4ad34191d67bee63b98e76ab55a...HEAD -- src/app.py src/store.py \
+            | grep -E 'BEGIN [A-Z ]*PRIVATE KEY|SIGN_SEED|technocore\.seed|github[_ -]?token'; then
+            echo "possible secret material in diff" >&2
+            exit 1
+          fi
+      - name: Preserve the size-policy failure as the job verdict
+        if: always() && (steps.just_check.outcome != 'success' || steps.size.outcome != 'success')
+        run: |
+          echo "Option A intentionally remains blocked by the current core caps/baseline."
+          exit 1
+
+  python:
+    name: "full Python, lint, format and Ty"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check
+      - run: uv run coverage run -m pytest tests -q
+      - run: uv run coverage report
+      - run: git diff --check
+
+  humans:
+    name: "Chromium humans probe"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Install Chromium
+        working-directory: tests
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Start service
+        run: |
+          CHAT_ROOT="$(mktemp -d)" uv run uvicorn --app-dir src app:app --port 8099 --log-level warning &
+          for _ in $(seq 30); do
+            curl -fsS localhost:8099/healthz && break
+            sleep 1
+          done
+          curl -fsS localhost:8099/healthz
+      - run: node tests/humans_ui_probe.mjs 8099
+
+  contract:
+    name: "OpenAPI contract"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Start service
+        run: |
+          CHAT_ROOT="$(mktemp -d)" CHAT_MAX_WAIT=1 \
+          CHAT_RATE_READ=1000000 CHAT_RATE_WRITE=1000000 CHAT_RATE_ROOMS_PER_DAY=1000000 \
+            uv run uvicorn --app-dir src app:app --port 8099 --log-level warning &
+          for _ in $(seq 30); do
+            curl -fsS localhost:8099/healthz && break
+            sleep 1
+          done
+          curl -fsS localhost:8099/healthz
+      - run: |
+          uv run schemathesis run http://localhost:8099/openapi.json \
+            --url http://localhost:8099 \
+            --checks not_a_server_error,status_code_conformance,content_type_conformance,response_headers_conformance,response_schema_conformance,unsupported_method,allow_header_conformance \
+            --phases examples,coverage,fuzzing \
+            --max-examples 25 \
+            --generation-deterministic \
+            --max-response-time 10 \
+            --warnings missing_deserializer,unused_openapi_auth,unsupported_regex,method_not_allowed,constants_extraction,unmatched_filter \
+            --no-color
+
+  worker:
+    name: "MCP worker bundle"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+      - run: uv build --wheel -o mcp/dist --project mcp
+      - name: Resolve and bundle
+        working-directory: mcp/worker
+        run: |
+          set -o pipefail
+          uv run pywrangler deploy --dry-run 2>&1 | tee bundle.log
+          if grep -qE '^ERROR|Installation of packages into the Python Worker failed' bundle.log; then
+            exit 1
+          fi
+          grep -q 'Total Upload' bundle.log
+
+  docker:
+    name: "Docker build and smoke"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -f docker/Dockerfile -t technocore-chat:pr795-option-a .
+      - run: |
+          docker run -d --name technocore-pr795 -e CHAT_ROOT=/tmp/chat -p 8080:8080 technocore-chat:pr795-option-a
+          for _ in $(seq 30); do
+            curl -fsS localhost:8080/healthz && break
+            sleep 1
+          done
+          curl -fsS 'localhost:8080/r/ci/say/bot/hello%20ci' | grep -q '<~bot> hello ci'
+          curl -fsS localhost:8080/r/ci | grep -q 'hello ci'
+          curl -fsS localhost:8080/openapi.json | grep -q '"openapi"'
+          curl -fsS localhost:8080/.well-known/agent.json | grep -q '"content_is_untrusted"'
+
+  base-regression:
+    name: "new regressions fail on unfixed base"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Overlay the new tests onto the unfixed base
+        run: |
+          mkdir -p /tmp/pr795-tests/http /tmp/pr795-tests/edge
+          cp tests/http/test_rooms.py /tmp/pr795-tests/http/
+          cp tests/edge/test_edge_worker.py /tmp/pr795-tests/edge/
+          git checkout 73a732497a19cac11aff4dcb527bae3c52b02f73
+          cp /tmp/pr795-tests/http/test_rooms.py tests/http/test_rooms.py
+          cp /tmp/pr795-tests/edge/test_edge_worker.py tests/edge/test_edge_worker.py
+          uv sync --frozen
+      - name: Require the unfixed base to fail the new regression cases
+        run: |
+          set +e
+          uv run pytest -q \
+            tests/http/test_rooms.py::test_rooms_kind_filters_before_the_detail_limit \
+            tests/http/test_rooms.py::test_rooms_whole_store_capacity_counts_unlisted_without_naming_them \
+            tests/http/test_rooms.py::test_rooms_text_separates_category_stats_from_whole_store_capacity \
+            tests/http/test_rooms.py::test_rooms_labels_stale_whole_store_bytes_after_an_existing_room_grows \
+            tests/http/test_rooms.py::test_rooms_text_empty_state_names_the_selected_kind \
+            tests/edge/test_edge_worker.py::test_the_edge_key_is_the_reply_space_and_not_the_url_space
+          status=$?
+          set -e
+          if [[ $status -eq 0 ]]; then
+            echo "The new regressions unexpectedly pass on the unfixed base." >&2
+            exit 1
+          fi
+          echo "The new regression cases fail on the unfixed base as expected."

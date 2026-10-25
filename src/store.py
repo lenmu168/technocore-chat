@@ -1410,7 +1410,8 @@ def room_stats(root: Path, limit: int = DEFAULT_LIMIT, kind: str = "all") -> dic
             continue  # reaped between the readdir and the stat
         entries.append((st.st_mtime, st.st_size, name, st.st_mtime_ns))
     entries.sort(reverse=True)
-    shown, windows = [], []
+    shown = []
+    windows = []
     root_key = str(root)  # hoisted: it is the first element of both memo keys, per room
     topics_stamp = (counters(root, strict=False)["topics_written"], root_key)
     mono = time.monotonic()
@@ -2191,12 +2192,15 @@ def _count_notes(root: Path) -> tuple[int, int]:
     """
     total = 0
     size = 0
-    with suppress(FileNotFoundError), os.scandir(root / "notes") as namespaces:
-        for ns in namespaces:
-            if ns.is_dir():
-                count, ns_bytes = _scan(ns.path, ".txt", sized=True)
-                total += count
-                size += ns_bytes
+    try:
+        with os.scandir(root / "notes") as namespaces:
+            for ns in namespaces:
+                if ns.is_dir():
+                    count, ns_bytes = _scan(ns.path, ".txt", sized=True)
+                    total += count
+                    size += ns_bytes
+    except FileNotFoundError:
+        pass
     return total, size
 
 
@@ -2231,10 +2235,12 @@ def _read_counts(d: Path, name: str = NOTES_FILE) -> tuple[int, int] | None:
     answer to that — `_note_totals` walks, `room_bytes_used` reads it as no pressure, and the
     reaper writes what its own walk saw — and each one says why.
     """
-    with suppress(OSError, ValueError):
+    try:
         count, size = (d / name).read_text(encoding="utf-8").split()
         if int(count) >= 0 and int(size) >= 0:
             return int(count), int(size)
+    except (OSError, ValueError):
+        pass
     return None
 
 
@@ -2268,8 +2274,10 @@ def _note_totals(d: Path, rebuild=_count_notes, persist=False, name=NOTES_FILE) 
         return cached
     totals = rebuild(d)
     if persist and totals[0]:
-        with suppress(OSError):
+        try:
             _write_note_count(d, *totals, name=name)
+        except OSError:
+            pass
     return totals
 
 

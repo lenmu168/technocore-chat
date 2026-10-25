@@ -932,10 +932,11 @@ def _rooms_view(limit: int, kind: str = "all") -> dict:
     read here, per call, and at zero the walk goes straight past the cache rather than
     trying to expire what is in it.
     """
-    if (ttl := config.ROOMS_CACHE_SECONDS) <= 0:
+    stamp = _rooms_stamp()  # before the walk, never after — see _rooms_stamp
+    ttl = config.ROOMS_CACHE_SECONDS
+    if ttl <= 0:
         return _rooms_payload(limit, kind)
-    # Stamp before the walk, never after — see _rooms_stamp.
-    return _rooms_walk(limit, _rooms_stamp(), store._time_bucket(time.monotonic(), ttl), kind)
+    return _rooms_walk(limit, stamp, store._time_bucket(time.monotonic(), ttl), kind)
 
 
 def rooms(request: Request) -> Response:
@@ -953,15 +954,17 @@ def rooms(request: Request) -> Response:
     view = _rooms_view(min(_cursor(q.get("limit"), 50) or 1, store.MAX_LIMIT), kind)
     # Both note caps, for the reason the room head prints both of its own: either can be the
     # one that refuses the next write, and the per-namespace figure moves per deployment.
+    n = view["notes"]
     notes_line = (
-        f"# notes {(n := view['notes'])['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
+        f"# notes {n['total']} of {n['capacity']} ({_size(n['bytes'])} total, "
         f"{n['capacity_per_namespace']} per namespace, namespaces not listed)"
     )
     whole = view["whole_store"]
-    # fmt: off
-    whole_line = f"# whole store {whole['total']} of {whole['capacity']} rooms " \
-                 f"({_size(whole['bytes_at_last_reap'])} room bytes at last reap of {_size(whole['bytes_capacity'])} budget; private/unlisted names not listed)"
-    # fmt: on
+    whole_line = (
+        f"# whole store {whole['total']} of {whole['capacity']} rooms "
+        f"({_size(whole['bytes_at_last_reap'])} room bytes at last reap of "
+        f"{_size(whole['bytes_capacity'])} budget; private/unlisted names not listed)"
+    )
     if not view["total"]:
         empty = {
             "discussion": "(no discussions)",
@@ -992,7 +995,8 @@ def rooms(request: Request) -> Response:
             for r in view["rooms"]
         ] + [notes_line]
         e = view["engagement"]
-        if seen := e["windowed_messages"]:
+        seen = e["windowed_messages"]
+        if seen:
             lines.append(
                 f"# engagement over {seen} msgs scanned: zero-response "
                 f"{e['zero_response_share']:.0%}, nick diversity "
