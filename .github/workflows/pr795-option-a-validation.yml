@@ -100,13 +100,18 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Start service
         run: |
-          CHAT_ROOT="$(mktemp -d)" uv run uvicorn --app-dir src app:app --port 8099 --log-level warning &
+          CHAT_ROOT="$(mktemp -d)" CHAT_CLIENT_IP_HEADER=x-technocore-probe-ip \
+            CHAT_STATS_TOKEN=probe \
+            uv run uvicorn --app-dir src app:app --port 8099 --log-level warning &
           for _ in $(seq 30); do
             curl -fsS localhost:8099/healthz && break
             sleep 1
           done
           curl -fsS localhost:8099/healthz
       - run: node tests/humans_ui_probe.mjs 8099
+      - name: Report request and limiter counters
+        if: always()
+        run: curl -fsS -H 'x-stats-token: probe' localhost:8099/stats
 
   contract:
     name: "OpenAPI contract"
@@ -141,33 +146,46 @@ jobs:
             --warnings missing_deserializer,unused_openapi_auth,unsupported_regex,method_not_allowed,constants_extraction,unmatched_filter \
             --no-color
 
-  humans-diagnostic:
-    name: "Chromium probe with read limiter removed"
+  upstream-humans-diagnostic:
+    name: "upstream main one-IP request diagnostic"
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           enable-cache: true
+      - name: Check out the upstream main used by Option A
+        run: git checkout 73a732497a19cac11aff4dcb527bae3c52b02f73
       - run: uv sync --frozen
       - name: Install Chromium
         working-directory: tests
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: Start service with only the read limiter raised for diagnosis
+      - name: Start service with the production-default read limit
         run: |
-          CHAT_ROOT="$(mktemp -d)" CHAT_RATE_READ=1000000 \
+          CHAT_ROOT="$(mktemp -d)" CHAT_STATS_TOKEN=probe \
             uv run uvicorn --app-dir src app:app --port 8099 --log-level warning &
           for _ in $(seq 30); do
             curl -fsS localhost:8099/healthz && break
             sleep 1
           done
           curl -fsS localhost:8099/healthz
-      - run: node tests/humans_ui_probe.mjs 8099
+      - name: Run upstream probe without per-context client isolation
+        id: probe
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          node tests/humans_ui_probe.mjs 8099 | tee /tmp/upstream-humans.log
+      - name: Report upstream request and limiter counters
+        if: always()
+        run: |
+          echo "upstream probe outcome: ${{ steps.probe.outcome }}"
+          curl -fsS -H 'x-stats-token: probe' localhost:8099/stats
 
   worker:
     name: "MCP worker bundle"
