@@ -111,7 +111,8 @@ jobs:
       - run: node tests/humans_ui_probe.mjs 8099
       - name: Report request and limiter counters
         if: always()
-        run: curl -fsS -H 'x-stats-token: probe' localhost:8099/stats
+        run: |
+          curl -fsS -H 'x-stats-token: probe' localhost:8099/stats
 
   contract:
     name: "OpenAPI contract"
